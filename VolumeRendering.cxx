@@ -1,23 +1,22 @@
-#include <vtkRenderWindow.h>
-#include <vtkRenderer.h>
-#include <vtkRenderWindowInteractor.h>
-#include <vtkDataSetReader.h>
-#include <vtkDataSetMapper.h>
-#include <vtkActor.h>
-#include <vtkLookupTable.h>
 #include <vtkImageData.h>
 #include <vtkCellLocator.h>
 #include <vtkRectilinearGridReader.h>
 #include <vtkRectilinearGrid.h>
-#include <vtkProbeFilter.h>
-#include <vtkBox.h>
 #include <vtkCell.h>
 #include <vtkPointData.h>
 #include <vtkPNGWriter.h>
 #include <Kokkos_Core.hpp>
+#include <vtkRectilinearGridWriter.h>
+#include <omp.h>
+#include <chrono>
 #include <fstream>
 
 #include "DataStructs.h"
+
+// parallel x, threshold 0.99: 402 seconds
+// parallel x, threshold 0.95: 643 seconds?
+// parallel x, threshold 0.95: (attempt 2) 374 seconds?
+// parallel x, threshold 0.90: 374 seconds?
 
 using namespace std;
 
@@ -75,6 +74,10 @@ void sampleAlongRay(Vector3<double> ray, const int n_samples,
 	}
 }
 
+struct ProcessRaysFunctor {
+
+};
+
 int main(int argc, char* argv[])
 {
 	Kokkos::initialize(argc, argv);
@@ -94,11 +97,11 @@ int main(int argc, char* argv[])
 	Kokkos::printf("Goodbye World\n");
 	Kokkos::finalize();
 
-	const int IMG_SIZE = 100;
+	const int IMG_SIZE = 1000;
 	const int REF_SAMPLE = 500;
-	const int SAMPLES_PER_RAY = 256;
+	const int SAMPLES_PER_RAY = 500;
 	double op_ratio = (double)REF_SAMPLE / (double)SAMPLES_PER_RAY;
-	const char* FILE_NAME = "astro64.vtk";
+	const char* FILE_NAME = "astro_bin.vtk";
 
 	auto image = vtkImageData::New();
 	image->SetDimensions(IMG_SIZE, IMG_SIZE, 1);
@@ -127,6 +130,13 @@ int main(int argc, char* argv[])
 		vtkSmartPointer<vtkRectilinearGridReader>::New();
 	reader->SetFileName(FILE_NAME); reader->Update();
 	vtkRectilinearGrid* data = reader->GetOutput();
+	//vtkRectilinearGridWriter* fwriter = vtkRectilinearGridWriter::New();
+	//fwriter->SetFileVersion(42);
+	//fwriter->SetFileName("astro_bin.vtk");
+	//fwriter->SetInputData(data);
+	//fwriter->SetFileTypeToBinary();
+	//fwriter->Write();
+	//return 0;
 	double bounds[6];
 	data->GetBounds(bounds);
 
@@ -142,8 +152,10 @@ int main(int argc, char* argv[])
 	vtkCellLocator* locator = vtkCellLocator::New();
 	locator->SetDataSet(data);
 
-
+	auto start = chrono::steady_clock::now();
 	for (int y = 0; y < IMG_SIZE; y++) {
+		//Kokkos::parallel_for(IMG_SIZE)
+//#pragma omp parallel for
 		for (int x = 0; x < IMG_SIZE; x++) {
 			Vector3<double> ray = look_norm + ((2.0 * (double) x + 1.0 - (double) IMG_SIZE) / 2.0) * dx
 											+ ((2.0 * (double) y + 1.0 - (double) IMG_SIZE) / 2.0) * dy;
@@ -181,6 +193,10 @@ int main(int argc, char* argv[])
 					sampleRGB[2] = map225to1(RGB[2]);
 					final_opacity = opacity;
 				}
+
+				if (final_opacity >= 0.99) {
+					break;
+				}
 			}
 
 			int img_index = (y * IMG_SIZE + x) * 3;
@@ -190,9 +206,14 @@ int main(int argc, char* argv[])
 
 		}
 	}
+	auto end = std::chrono::steady_clock::now();
+	auto duration = end - start; 
+
+	auto seconds = chrono::duration_cast<chrono::seconds>(duration).count();
+	cout << "execution time: " << seconds << " seconds" << endl;
 
 	auto writer = vtkPNGWriter::New();
-	writer->SetFileName("test_out.png");
+	writer->SetFileName("99astro.png");
 	writer->SetInputData(image);
 	writer->Write();
 	

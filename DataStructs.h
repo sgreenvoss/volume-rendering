@@ -111,6 +111,20 @@ struct TransferFunction
         return -1;
     }
 
+    static int GetBin(double value, double max, double min, double n_bins) {
+        double delta = (max - min) / (double)n_bins;
+
+        for (int i = 0; i < n_bins; i++) {
+            double cv = min + delta * i;
+            double nv = min + delta * (i + 1);
+
+            if (value >= cv && value < nv) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     void ApplyTransferFunction(double value, unsigned char* RGB, double& opacity)
     {
         int bin = GetBin(value);
@@ -124,6 +138,22 @@ struct TransferFunction
         RGB[0] = colors[3*bin+0];
         RGB[1] = colors[3*bin+1];
         RGB[2] = colors[3*bin+2];
+        opacity = opacities[bin];
+    }
+
+    static void ApplyTransferFunction(double value, unsigned char* RGB, double& opacity,
+        unsigned char* colors, int bin, double* opacities)
+    {
+        if (bin == -1) {
+            RGB[0] = 0;
+            RGB[1] = 0;
+            RGB[2] = 0;
+            opacity = 0;
+            return;
+        }
+        RGB[0] = colors[3 * bin + 0];
+        RGB[1] = colors[3 * bin + 1];
+        RGB[2] = colors[3 * bin + 2];
         opacity = opacities[bin];
     }
 };

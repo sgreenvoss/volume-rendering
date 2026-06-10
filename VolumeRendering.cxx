@@ -1,12 +1,14 @@
 #include <vtkImageData.h>
-#include <vtkCellLocator.h>
+#include <vtkStaticCellLocator.h>
 #include <vtkRectilinearGridReader.h>
 #include <vtkRectilinearGrid.h>
 #include <vtkCell.h>
 #include <vtkPointData.h>
 #include <vtkPNGWriter.h>
 #include <Kokkos_Core.hpp>
-#include <vtkRectilinearGridWriter.h>
+#include <vtkObject.h>
+#include <vtkGenericCell.h>
+#include <vtkSMPTools.h>
 #include <omp.h>
 #include <chrono>
 #include <fstream>
@@ -17,6 +19,11 @@
 // parallel x, threshold 0.95: 643 seconds?
 // parallel x, threshold 0.95: (attempt 2) 374 seconds?
 // parallel x, threshold 0.90: 374 seconds?
+// more more parallel: 852 :( 791 669
+
+// properly enabling omp, threshold 0.95: 200s
+// parallel ray sampling too, threshold 0.95: 314
+// parallel ray sampling too, removing shared vars smh, threshold 0.95: 319
 
 using namespace std;
 
@@ -43,65 +50,59 @@ unsigned char map1to255(double val) {
 
 void sampleAlongRay(Vector3<double> ray, const int n_samples, 
 					Camera cam, int step_size, double* samples,
-					vtkRectilinearGrid* data, vtkCellLocator* locator,
+					vtkRectilinearGrid* data, vtkStaticCellLocator* locator,
 					vtkDataArray* scalars) {
-	for (int i = 0; i < n_samples; i++) {
-		Vector3<double> point = cam.position + (ray * (cam.near + (double)i * step_size));
-		//cout << point << endl;
-		vtkIdType cellId = locator->FindCell(point.coords);
-		//cout << cellId << endl;
 
-		vtkCell* cell = data->GetCell(cellId);
-		double closest_pt[3];
+	vtkGenericCell* genericCell = vtkGenericCell::New();
+
+	const double ox = cam.position.x + ray.x * cam.near;
+	const double oy = cam.position.y + ray.y * cam.near;
+	const double oz = cam.position.z + ray.z * cam.near;
+	const double dx = ray.x * step_size;
+	const double dy = ray.y * step_size;
+	const double dz = ray.z * step_size;
+
+	for (int i = 0; i < n_samples; i++) {
 		double pcoords[3];
 		double weights[8];
-		double dist2;
-		int subId;
-		int is_cell = cell->EvaluatePosition(point.coords, closest_pt, subId, pcoords, dist2, weights);
-		double interp_val = 0.0;
+		double point[3];
+		point[0] = ox + i * dx;
+		point[1] = oy + i * dy;
+		point[2] = oz + i * dz;
+		
+		vtkIdType cellId = locator->FindCell(point, 1e-10, genericCell, pcoords, weights);
 
-		if (is_cell) {
-			for (int j = 0; j < 8; j++) {
-				vtkIdType p = cell->GetPointId(j);
-				double val = scalars->GetTuple1(p);
-				interp_val += weights[j] * val;
-			}
+		if (cellId < 0) {
+			samples[i] = 0.0;
+			continue;
 		}
-		else {
-			interp_val = 0.0;
+
+		double interp_val = 0.0;
+		for (int j = 0; j < 8; j++) {
+			interp_val += weights[j] * scalars->GetTuple1(genericCell->GetPointId(j));
 		}
 		samples[i] = interp_val;
 	}
+	genericCell->Delete();
 }
 
-struct ProcessRaysFunctor {
+//struct ProcessRayFunctor {
+//	double* _image_buffer;
+//
+//	ProcessRayFunctor(double* )
+//};
 
-};
 
 int main(int argc, char* argv[])
 {
-	Kokkos::initialize(argc, argv);
-	{
-		// Allocate a 1-dimensional view of integers
-		Kokkos::View<int*> v("v", 5);
-		// Fill view with sequentially increasing values v=[0,1,2,3,4]
-		Kokkos::parallel_for("fill", 5, KOKKOS_LAMBDA(int i) { v(i) = i; });
-		// Compute accumulated sum of v's elements r=0+1+2+3+4
-		int r;
-		Kokkos::parallel_reduce(
-			"accumulate", 5,
-			KOKKOS_LAMBDA(int i, int& partial_r) { partial_r += v(i); }, r);
-		// Check the result
-		KOKKOS_ASSERT(r == 10);
-	}
-	Kokkos::printf("Goodbye World\n");
-	Kokkos::finalize();
-
+	vtkObject::GlobalWarningDisplayOff();
+	//vtkSMPTools::SetBackend("OpenMP");
+	cout << _OPENMP << endl;
 	const int IMG_SIZE = 1000;
 	const int REF_SAMPLE = 500;
 	const int SAMPLES_PER_RAY = 500;
 	double op_ratio = (double)REF_SAMPLE / (double)SAMPLES_PER_RAY;
-	const char* FILE_NAME = "astro_bin.vtk";
+	const char* FILE_NAME = "astro512_ascii.vtk";
 
 	auto image = vtkImageData::New();
 	image->SetDimensions(IMG_SIZE, IMG_SIZE, 1);
@@ -130,16 +131,6 @@ int main(int argc, char* argv[])
 		vtkSmartPointer<vtkRectilinearGridReader>::New();
 	reader->SetFileName(FILE_NAME); reader->Update();
 	vtkRectilinearGrid* data = reader->GetOutput();
-	//vtkRectilinearGridWriter* fwriter = vtkRectilinearGridWriter::New();
-	//fwriter->SetFileVersion(42);
-	//fwriter->SetFileName("astro_bin.vtk");
-	//fwriter->SetInputData(data);
-	//fwriter->SetFileTypeToBinary();
-	//fwriter->Write();
-	//return 0;
-	double bounds[6];
-	data->GetBounds(bounds);
-
 
 	double step_size = (cam.far - cam.near) / (double)(SAMPLES_PER_RAY - 1);
 	cout << "step size: " << step_size << endl;
@@ -149,63 +140,71 @@ int main(int argc, char* argv[])
 	cout << "dx " << dx << endl;
 	cout << "dy: " << dy << endl;
 
-	vtkCellLocator* locator = vtkCellLocator::New();
-	locator->SetDataSet(data);
+	vtkPointData* pt_data = data->GetPointData();
+	string arr_name = pt_data->GetArrayName(0);
+	vtkDataArray* scalars = pt_data->GetArray(arr_name.c_str());
 
 	auto start = chrono::steady_clock::now();
+	cout << "started the for loop" << endl;
+
+	vtkStaticCellLocator* locator = vtkStaticCellLocator::New();
+	locator->SetDataSet(data);
+	locator->BuildLocator();
+
+#pragma omp parallel
+{
+	unsigned char* local_colors = tf.colors;
+	double* local_opacities = tf.opacities;
+	const int local_num_bins = tf.numBins;
+	const double local_min = tf.min;
+	const double local_max = tf.max;
+
+	#pragma omp for collapse(2)
 	for (int y = 0; y < IMG_SIZE; y++) {
-		//Kokkos::parallel_for(IMG_SIZE)
-//#pragma omp parallel for
-		for (int x = 0; x < IMG_SIZE; x++) {
-			Vector3<double> ray = look_norm + ((2.0 * (double) x + 1.0 - (double) IMG_SIZE) / 2.0) * dx
-											+ ((2.0 * (double) y + 1.0 - (double) IMG_SIZE) / 2.0) * dy;
-			Vector3<double> end_pt(cam.position.x + ray.x * 1e8,
-								   cam.position.y + ray.y * 1e8,
-							   	   cam.position.z + ray.z * 1e8);
+			for (int x = 0; x < IMG_SIZE; x++) {
+				Vector3<double> ray = look_norm + ((2.0 * (double)x + 1.0 - (double)IMG_SIZE) / 2.0) * dx
+					+ ((2.0 * (double)y + 1.0 - (double)IMG_SIZE) / 2.0) * dy;
 
-			double sample[SAMPLES_PER_RAY];
-			vtkPointData* pt_data = data->GetPointData();
-			string arr_name = pt_data->GetArrayName(0);
-			vtkDataArray* scalars = pt_data->GetArray(arr_name.c_str());
+				double sample[SAMPLES_PER_RAY];
 
+				sampleAlongRay(ray, SAMPLES_PER_RAY, cam, step_size, sample, data, locator, scalars);
 
-			sampleAlongRay(ray, SAMPLES_PER_RAY, cam, step_size, sample, data, locator, scalars);
+				// calculate color
+				double sampleRGB[3];
+				double final_opacity;
 
-			// calculate color
-			double sampleRGB[3]; 
-			double final_opacity;
+				for (int i = 0; i < SAMPLES_PER_RAY; i++) {
+					unsigned char RGB[3];
+					double opacity;
+					int bin = TransferFunction::GetBin(sample[i], local_max, local_min, local_num_bins);
+					TransferFunction::ApplyTransferFunction(sample[i], RGB, opacity, local_colors, bin, local_opacities);
 
-			for (int i = 0; i < SAMPLES_PER_RAY; i++) {
-				unsigned char RGB[3];
-				double opacity;
-				tf.ApplyTransferFunction(sample[i], RGB, opacity);
+					if (i >= 1) {
+						opacity = 1 - pow(1 - opacity, op_ratio);
+						sampleRGB[0] = colorEq(final_opacity, opacity, sampleRGB[0], map225to1(RGB[0]));
+						sampleRGB[1] = colorEq(final_opacity, opacity, sampleRGB[1], map225to1(RGB[1]));
+						sampleRGB[2] = colorEq(final_opacity, opacity, sampleRGB[2], map225to1(RGB[2]));
+						final_opacity = final_opacity + (1 - final_opacity) * opacity;
+					}
+					else {
+						sampleRGB[0] = map225to1(RGB[0]);
+						sampleRGB[1] = map225to1(RGB[1]);
+						sampleRGB[2] = map225to1(RGB[2]);
+						final_opacity = opacity;
+					}
 
-				if (i >= 1) {
-					opacity = 1 - pow(1 - opacity, op_ratio);
-					sampleRGB[0] = colorEq(final_opacity, opacity, sampleRGB[0], map225to1(RGB[0]));
-					sampleRGB[1] = colorEq(final_opacity, opacity, sampleRGB[1], map225to1(RGB[1]));
-					sampleRGB[2] = colorEq(final_opacity, opacity, sampleRGB[2], map225to1(RGB[2]));
-					final_opacity = final_opacity + (1 - final_opacity) * opacity;
-				}
-				else {
-					sampleRGB[0] = map225to1(RGB[0]);
-					sampleRGB[1] = map225to1(RGB[1]);
-					sampleRGB[2] = map225to1(RGB[2]);
-					final_opacity = opacity;
+					if (final_opacity >= 0.99) {
+						break;
+					}
 				}
 
-				if (final_opacity >= 0.99) {
-					break;
-				}
+				int img_index = (y * IMG_SIZE + x) * 3;
+				image_buffer[img_index] = map1to255(sampleRGB[0]);
+				image_buffer[img_index + 1] = map1to255(sampleRGB[1]);
+				image_buffer[img_index + 2] = map1to255(sampleRGB[2]);
 			}
-
-			int img_index = (y * IMG_SIZE + x) * 3;
-			image_buffer[img_index] = map1to255(sampleRGB[0]);
-			image_buffer[img_index+1] = map1to255(sampleRGB[1]);
-			image_buffer[img_index+2] = map1to255(sampleRGB[2]);
-
-		}
 	}
+}
 	auto end = std::chrono::steady_clock::now();
 	auto duration = end - start; 
 
@@ -216,7 +215,7 @@ int main(int argc, char* argv[])
 	writer->SetFileName("99astro.png");
 	writer->SetInputData(image);
 	writer->Write();
-	
+
 }
 
 

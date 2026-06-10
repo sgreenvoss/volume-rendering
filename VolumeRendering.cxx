@@ -1,5 +1,5 @@
 #include <vtkImageData.h>
-#include <vtkStaticCellLocator.h>
+#include <vtkCellLocator.h>
 #include <vtkRectilinearGridReader.h>
 #include <vtkRectilinearGrid.h>
 #include <vtkCell.h>
@@ -24,6 +24,7 @@
 // properly enabling omp, threshold 0.95: 200s
 // parallel ray sampling too, threshold 0.95: 314
 // parallel ray sampling too, removing shared vars smh, threshold 0.95: 319
+// 119 seconds
 
 using namespace std;
 
@@ -49,11 +50,10 @@ unsigned char map1to255(double val) {
 }
 
 void sampleAlongRay(Vector3<double> ray, const int n_samples, 
-					Camera cam, int step_size, double* samples,
-					vtkRectilinearGrid* data, vtkStaticCellLocator* locator,
-					vtkDataArray* scalars) {
+					Camera cam, double step_size, double* samples,
+					vtkRectilinearGrid* data, vtkCellLocator* locator,
+					vector<double> scalars, vtkGenericCell* genericCell) {
 
-	vtkGenericCell* genericCell = vtkGenericCell::New();
 
 	const double ox = cam.position.x + ray.x * cam.near;
 	const double oy = cam.position.y + ray.y * cam.near;
@@ -79,30 +79,23 @@ void sampleAlongRay(Vector3<double> ray, const int n_samples,
 
 		double interp_val = 0.0;
 		for (int j = 0; j < 8; j++) {
-			interp_val += weights[j] * scalars->GetTuple1(genericCell->GetPointId(j));
+			interp_val += weights[j] * scalars[genericCell->GetPointId(j)];
 		}
 		samples[i] = interp_val;
 	}
-	genericCell->Delete();
 }
 
-//struct ProcessRayFunctor {
-//	double* _image_buffer;
-//
-//	ProcessRayFunctor(double* )
-//};
 
 
 int main(int argc, char* argv[])
 {
 	vtkObject::GlobalWarningDisplayOff();
 	//vtkSMPTools::SetBackend("OpenMP");
-	cout << _OPENMP << endl;
-	const int IMG_SIZE = 1000;
+	const int IMG_SIZE = 500;
 	const int REF_SAMPLE = 500;
-	const int SAMPLES_PER_RAY = 500;
+	const int SAMPLES_PER_RAY = 256;
 	double op_ratio = (double)REF_SAMPLE / (double)SAMPLES_PER_RAY;
-	const char* FILE_NAME = "astro512_ascii.vtk";
+	const char* FILE_NAME = "astro64.vtk";
 
 	auto image = vtkImageData::New();
 	image->SetDimensions(IMG_SIZE, IMG_SIZE, 1);
@@ -144,20 +137,37 @@ int main(int argc, char* argv[])
 	string arr_name = pt_data->GetArrayName(0);
 	vtkDataArray* scalars = pt_data->GetArray(arr_name.c_str());
 
-	auto start = chrono::steady_clock::now();
-	cout << "started the for loop" << endl;
 
-	vtkStaticCellLocator* locator = vtkStaticCellLocator::New();
+	vtkCellLocator* locator = vtkCellLocator::New();
 	locator->SetDataSet(data);
+	// allegedly my OOM comes from the locator being lazily built, so this section might
+	// force it to properly set itself up 
 	locator->BuildLocator();
+
+	vector<double> adjusted_op(tf.numBins);
+	for (int i = 0; i < tf.numBins; i++) {
+		adjusted_op[i] = pow(1 - tf.opacities[i], op_ratio);
+	}
+
+	cout << "Scalar tuples: " << scalars->GetNumberOfTuples() << endl;
+	cout << "Grid points:   " << data->GetNumberOfPoints() << endl;
+	vtkIdType numPts = scalars->GetNumberOfTuples();
+	vector<double> scalarData(numPts);
+	for (vtkIdType i = 0; i < numPts; i++)
+		scalarData[i] = scalars->GetTuple1(i);
+	cout << "started the for loop" << endl;
+	auto start = chrono::steady_clock::now();
 
 #pragma omp parallel
 {
 	unsigned char* local_colors = tf.colors;
-	double* local_opacities = tf.opacities;
 	const int local_num_bins = tf.numBins;
 	const double local_min = tf.min;
 	const double local_max = tf.max;
+	vector<double>local_adj_op = adjusted_op;
+	vtkGenericCell* genericCell = vtkGenericCell::New();
+
+
 
 	#pragma omp for collapse(2)
 	for (int y = 0; y < IMG_SIZE; y++) {
@@ -167,35 +177,30 @@ int main(int argc, char* argv[])
 
 				double sample[SAMPLES_PER_RAY];
 
-				sampleAlongRay(ray, SAMPLES_PER_RAY, cam, step_size, sample, data, locator, scalars);
+				sampleAlongRay(ray, SAMPLES_PER_RAY, cam, step_size, sample, data, locator, scalarData, genericCell);
 
 				// calculate color
-				double sampleRGB[3];
-				double final_opacity;
+				double sampleRGB[3] = { 0.0, 0.0, 0.0 };
+				double final_opacity = 0.0;
+				unsigned char RGB[3] = { 0, 0, 0 };
+				int bin;
+				double opacity;
 
 				for (int i = 0; i < SAMPLES_PER_RAY; i++) {
-					unsigned char RGB[3];
-					double opacity;
-					int bin = TransferFunction::GetBin(sample[i], local_max, local_min, local_num_bins);
-					TransferFunction::ApplyTransferFunction(sample[i], RGB, opacity, local_colors, bin, local_opacities);
+					bin = TransferFunction::GetBin(sample[i], local_max, local_min, local_num_bins);
+					if (bin == -1) continue; // out of range, skip compositing
 
-					if (i >= 1) {
-						opacity = 1 - pow(1 - opacity, op_ratio);
-						sampleRGB[0] = colorEq(final_opacity, opacity, sampleRGB[0], map225to1(RGB[0]));
-						sampleRGB[1] = colorEq(final_opacity, opacity, sampleRGB[1], map225to1(RGB[1]));
-						sampleRGB[2] = colorEq(final_opacity, opacity, sampleRGB[2], map225to1(RGB[2]));
-						final_opacity = final_opacity + (1 - final_opacity) * opacity;
-					}
-					else {
-						sampleRGB[0] = map225to1(RGB[0]);
-						sampleRGB[1] = map225to1(RGB[1]);
-						sampleRGB[2] = map225to1(RGB[2]);
-						final_opacity = opacity;
-					}
+					opacity = 1 - local_adj_op[bin];
+					TransferFunction::ApplyTransferFunction(sample[i], RGB, local_colors, bin);
+					sampleRGB[0] = colorEq(final_opacity, opacity, sampleRGB[0], map225to1(RGB[0]));
+					sampleRGB[1] = colorEq(final_opacity, opacity, sampleRGB[1], map225to1(RGB[1]));
+					sampleRGB[2] = colorEq(final_opacity, opacity, sampleRGB[2], map225to1(RGB[2]));
+					final_opacity = final_opacity + (1 - final_opacity) * opacity;
+	
 
-					if (final_opacity >= 0.99) {
+					/*if (final_opacity >= 0.99) {
 						break;
-					}
+					}*/
 				}
 
 				int img_index = (y * IMG_SIZE + x) * 3;
@@ -204,17 +209,18 @@ int main(int argc, char* argv[])
 				image_buffer[img_index + 2] = map1to255(sampleRGB[2]);
 			}
 	}
+	
 }
 	auto end = std::chrono::steady_clock::now();
 	auto duration = end - start; 
 
 	auto seconds = chrono::duration_cast<chrono::seconds>(duration).count();
 	cout << "execution time: " << seconds << " seconds" << endl;
-
 	auto writer = vtkPNGWriter::New();
-	writer->SetFileName("99astro.png");
+	writer->SetFileName("smalltest.png");
 	writer->SetInputData(image);
 	writer->Write();
+	cout << "finished writing" << endl;
 
 }
 

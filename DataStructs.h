@@ -141,33 +141,21 @@ struct TransferFunction
         opacity = opacities[bin];
     }
 
-    static void ApplyTransferFunction(double value, unsigned char* RGB, double& opacity,
-        unsigned char* colors, int bin, double* opacities)
+    static void ApplyTransferFunction(double value, unsigned char* RGB, unsigned char* colors, int bin)
     {
         if (bin == -1) {
             RGB[0] = 0;
             RGB[1] = 0;
             RGB[2] = 0;
-            opacity = 0;
             return;
         }
         RGB[0] = colors[3 * bin + 0];
         RGB[1] = colors[3 * bin + 1];
         RGB[2] = colors[3 * bin + 2];
-        opacity = opacities[bin];
+        //opacity = opacities[bin];
     }
 };
 
 
 
 TransferFunction SetupTransferFunction(void);
-
-class Screen {
-    int         H;
-    int         W;
-
-public:
-    Screen(int height, int width) : H(height), W(width) {}
-
-    void        Hello();
-};

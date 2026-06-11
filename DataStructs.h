@@ -73,6 +73,8 @@ struct Camera
 
 Camera SetupCamera(void);
 
+// probably silly, but i was hitting some conflicts when parallelizing, so i made static
+// versions of each function here. there is most definitely a better solution out there.
 struct TransferFunction
 {
     double          min;

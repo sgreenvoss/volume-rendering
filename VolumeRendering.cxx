@@ -5,7 +5,6 @@
 #include <vtkCell.h>
 #include <vtkPointData.h>
 #include <vtkPNGWriter.h>
-#include <Kokkos_Core.hpp>
 #include <vtkObject.h>
 #include <vtkGenericCell.h>
 #include <vtkSMPTools.h>
@@ -22,6 +21,7 @@ const int IMG_SIZE = 1000;
 const int REF_SAMPLE = 500;
 const int SAMPLES_PER_RAY = 1024;
 const char* FILE_NAME = "astro512_ascii.vtk";
+const char* OUTPUT_NAME = "larger_test.png";
 
 double colorEq(double front_o, double back_o, double front, double back) {
 	return front + (1 - front_o) * back_o * back;
@@ -237,7 +237,7 @@ int main(int argc, char* argv[])
 	cout << "execution time: " << seconds << " seconds" << endl;
 
 	auto writer = vtkPNGWriter::New();
-	writer->SetFileName("larger_test.png");
+	writer->SetFileName(OUTPUT_NAME);
 	writer->SetInputData(image);
 	writer->Write();
 	cout << "finished writing" << endl;

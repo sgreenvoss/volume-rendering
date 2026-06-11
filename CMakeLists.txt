@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.12 FATAL_ERROR)
 project(HighlightPickedActor)
 
-find_package(Kokkos 5.1 REQUIRED CONFIG)
+#find_package(Kokkos 5.1 REQUIRED CONFIG)
 find_package(VTK COMPONENTS
   RenderingCore
   RenderingOpenGL2
@@ -23,7 +23,7 @@ add_executable(VolumeRendering MACOSX_BUNDLE
 
 target_link_libraries(VolumeRendering PRIVATE
   ${VTK_LIBRARIES}
-  Kokkos::kokkos
+ # Kokkos::kokkos
 )
 
 # vtk_module_autoinit is needed

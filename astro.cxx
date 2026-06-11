@@ -4,11 +4,6 @@
 
 using namespace std;
 
-
-void Screen::Hello() {
-    cout << "hallo" << endl;
-}
-
 TransferFunction
 SetupTransferFunction(void)
 {

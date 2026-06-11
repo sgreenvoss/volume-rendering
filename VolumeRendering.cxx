@@ -1,5 +1,5 @@
 #include <vtkImageData.h>
-#include <vtkCellLocator.h>
+#include <vtkStaticCellLocator.h>
 #include <vtkRectilinearGridReader.h>
 #include <vtkRectilinearGrid.h>
 #include <vtkCell.h>
@@ -15,32 +15,17 @@
 
 #include "DataStructs.h"
 
-// parallel x, threshold 0.99: 402 seconds
-// parallel x, threshold 0.95: 643 seconds?
-// parallel x, threshold 0.95: (attempt 2) 374 seconds?
-// parallel x, threshold 0.90: 374 seconds?
-// more more parallel: 852 :( 791 669
-
-// properly enabling omp, threshold 0.95: 200s
-// parallel ray sampling too, threshold 0.95: 314
-// parallel ray sampling too, removing shared vars smh, threshold 0.95: 319
-// 119 seconds
-
 using namespace std;
 
 const double PI = 3.1415926;
 
 double colorEq(double front_o, double back_o, double front, double back) {
 	return front + (1 - front_o) * back_o * back;
-	// 0.0000092 + (.002355) *  0.304082 * 0
 }
 
 double map225to1(unsigned char val) {
 	int v = val;
 	double slope = 1.0 / 255.0;
-	/*cout << "v: " << v << endl;
-	cout << "double v: " << (double)v << endl;
-	cout << "mapped color " << v << " to " << slope * (double) v << endl;*/
 	return slope * (double) v;
 }
 
@@ -49,9 +34,11 @@ unsigned char map1to255(double val) {
 	return (unsigned char)(slope * val);
 }
 
+
+// unused currently since I combined the loops, but could be useful still
 void sampleAlongRay(Vector3<double> ray, const int n_samples, 
 					Camera cam, double step_size, double* samples,
-					vtkRectilinearGrid* data, vtkCellLocator* locator,
+					vtkRectilinearGrid* data, vtkStaticCellLocator* locator,
 					vector<double> scalars, vtkGenericCell* genericCell) {
 
 
@@ -91,11 +78,11 @@ int main(int argc, char* argv[])
 {
 	vtkObject::GlobalWarningDisplayOff();
 	//vtkSMPTools::SetBackend("OpenMP");
-	const int IMG_SIZE = 500;
+	const int IMG_SIZE = 1000;
 	const int REF_SAMPLE = 500;
-	const int SAMPLES_PER_RAY = 256;
+	const int SAMPLES_PER_RAY = 1024;
 	double op_ratio = (double)REF_SAMPLE / (double)SAMPLES_PER_RAY;
-	const char* FILE_NAME = "astro64.vtk";
+	const char* FILE_NAME = "astro512_ascii.vtk";
 
 	auto image = vtkImageData::New();
 	image->SetDimensions(IMG_SIZE, IMG_SIZE, 1);
@@ -138,7 +125,7 @@ int main(int argc, char* argv[])
 	vtkDataArray* scalars = pt_data->GetArray(arr_name.c_str());
 
 
-	vtkCellLocator* locator = vtkCellLocator::New();
+	vtkStaticCellLocator* locator = vtkStaticCellLocator::New();
 	locator->SetDataSet(data);
 	// allegedly my OOM comes from the locator being lazily built, so this section might
 	// force it to properly set itself up 
@@ -148,9 +135,6 @@ int main(int argc, char* argv[])
 	for (int i = 0; i < tf.numBins; i++) {
 		adjusted_op[i] = pow(1 - tf.opacities[i], op_ratio);
 	}
-
-	cout << "Scalar tuples: " << scalars->GetNumberOfTuples() << endl;
-	cout << "Grid points:   " << data->GetNumberOfPoints() << endl;
 	vtkIdType numPts = scalars->GetNumberOfTuples();
 	vector<double> scalarData(numPts);
 	for (vtkIdType i = 0; i < numPts; i++)
@@ -167,31 +151,50 @@ int main(int argc, char* argv[])
 	vector<double>local_adj_op = adjusted_op;
 	vtkGenericCell* genericCell = vtkGenericCell::New();
 
-
-
-	#pragma omp for collapse(2)
+	#pragma omp for
 	for (int y = 0; y < IMG_SIZE; y++) {
 			for (int x = 0; x < IMG_SIZE; x++) {
 				Vector3<double> ray = look_norm + ((2.0 * (double)x + 1.0 - (double)IMG_SIZE) / 2.0) * dx
 					+ ((2.0 * (double)y + 1.0 - (double)IMG_SIZE) / 2.0) * dy;
-
-				double sample[SAMPLES_PER_RAY];
-
-				sampleAlongRay(ray, SAMPLES_PER_RAY, cam, step_size, sample, data, locator, scalarData, genericCell);
-
-				// calculate color
 				double sampleRGB[3] = { 0.0, 0.0, 0.0 };
 				double final_opacity = 0.0;
 				unsigned char RGB[3] = { 0, 0, 0 };
 				int bin;
 				double opacity;
 
+				const double ox = cam.position.x + ray.x * cam.near;
+				const double oy = cam.position.y + ray.y * cam.near;
+				const double oz = cam.position.z + ray.z * cam.near;
+				const double dx = ray.x * step_size;
+				const double dy = ray.y * step_size;
+				const double dz = ray.z * step_size;
+
 				for (int i = 0; i < SAMPLES_PER_RAY; i++) {
-					bin = TransferFunction::GetBin(sample[i], local_max, local_min, local_num_bins);
+					double interp_val = 0.0;
+
+					double pcoords[3];
+					double weights[8];
+					double point[3];
+					point[0] = ox + i * dx;
+					point[1] = oy + i * dy;
+					point[2] = oz + i * dz;
+
+					vtkIdType cellId = locator->FindCell(point, 1e-10, genericCell, pcoords, weights);
+
+					if (cellId < 0) {
+						interp_val = 0.0;
+					}
+					else {
+						for (int j = 0; j < 8; j++) {
+							interp_val += weights[j] * scalarData[genericCell->GetPointId(j)];
+						}
+					}
+
+					bin = TransferFunction::GetBin(interp_val, local_max, local_min, local_num_bins);
 					if (bin == -1) continue; // out of range, skip compositing
 
 					opacity = 1 - local_adj_op[bin];
-					TransferFunction::ApplyTransferFunction(sample[i], RGB, local_colors, bin);
+					TransferFunction::ApplyTransferFunction(interp_val, RGB, local_colors, bin);
 					sampleRGB[0] = colorEq(final_opacity, opacity, sampleRGB[0], map225to1(RGB[0]));
 					sampleRGB[1] = colorEq(final_opacity, opacity, sampleRGB[1], map225to1(RGB[1]));
 					sampleRGB[2] = colorEq(final_opacity, opacity, sampleRGB[2], map225to1(RGB[2]));
@@ -217,7 +220,7 @@ int main(int argc, char* argv[])
 	auto seconds = chrono::duration_cast<chrono::seconds>(duration).count();
 	cout << "execution time: " << seconds << " seconds" << endl;
 	auto writer = vtkPNGWriter::New();
-	writer->SetFileName("smalltest.png");
+	writer->SetFileName("larger_test.png");
 	writer->SetInputData(image);
 	writer->Write();
 	cout << "finished writing" << endl;
